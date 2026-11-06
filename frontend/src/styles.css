@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 /* Cherry blossom palette. --a, --o and --t are darker shades used for text,
    because the pastels themselves are too light to read on white. */
@@ -202,3 +202,31 @@ nav{gap:14px}
   .links{width:100%;order:2;gap:18px;overflow-x:auto;white-space:nowrap;padding-bottom:2px}
   .locpop{width:min(320px,90vw)}
 }
+
+.linkbtn { background: none; border: 0; font: inherit; color: inherit; cursor: pointer; padding: 0; }
+.linkbtn:hover { text-decoration: underline; }
+.hi { font-weight: 600; }
+
+/* ---- Redesign overrides: clean white, one strong accent ---- */
+:root{--display:Inter,system-ui,sans-serif;--body:Inter,system-ui,sans-serif;--dw:700;--a:#C2365C;--line:#4a2c3322}
+body{background:#fff}
+nav{background:#fff;backdrop-filter:none;border-bottom:1px solid #f1e3e6;box-shadow:0 2px 10px #0000000a;padding:12px 5vw}
+.logo{color:var(--a);font-size:1.45rem;letter-spacing:-.03em;font-weight:800}
+.btn,.pill,.links a.pill{background:var(--a);color:#fff;border-radius:12px}
+.btn:hover:not(:disabled),.links a.pill:hover{background:#9e2b4b;color:#fff;transform:none}
+.btn.ghost{background:#fff;color:var(--t);border:1px solid var(--line)}
+.btn.ghost:hover:not(:disabled){background:#FFF1F4;color:var(--t)}
+.btn.dark{background:var(--t)}
+.card,.panel,.kcard{border-radius:16px;box-shadow:0 2px 14px #0000000f;border-color:#f1e3e6;background:#fff}
+.chip{border-radius:999px}
+.chip.on,.seg button.on,.day.on{background:var(--a);border-color:var(--a);color:#fff}
+.day.on small{color:#ffffffcc}
+input,textarea,select{border-radius:10px}
+.locbtn{border-radius:999px}
+.locbtn.unset{background:#FFF1F4;border-color:var(--a)}
+.foot{background:#FAF3F4}
+.page{padding-top:28px}
+
+.pphoto { position: relative; }
+.heart { position: absolute; top: 10px; right: 10px; width: 36px; height: 36px; border-radius: 50%; border: 0; background: #ffffffe6; color: #c9b3b8; font-size: 1.2rem; cursor: pointer; }
+.heart.on { color: var(--a); }

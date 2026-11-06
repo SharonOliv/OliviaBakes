@@ -1,21 +1,35 @@
 const express = require('express');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { Pool, Client, types } = require('pg');
+const { Pool, types } = require('pg');
 
 types.setTypeParser(1082, v => v); // keep DATE columns as 'YYYY-MM-DD' strings (no timezone shifting)
 
 const ssl = process.env.DB_SSL === 'off' ? false : { rejectUnauthorized: false }; // DB_SSL=off for a local Postgres
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl, max: 5, connectionTimeoutMillis: 15000 });
+pool.on('error', e => console.error('Database connection dropped:', e.message));
 const dist = path.join(__dirname, '..', 'frontend', 'dist', 'web', 'browser');
 const app = express();
 app.set('trust proxy', 1);
+app.get('/healthz', (req, res) => res.send('ok'));
 app.use(express.json());
+
+// In development the Angular page (localhost:4200) calls this server directly. CORS_ORIGIN allows one more site.
+app.use((req, res, next) => {
+  const o = req.get('origin');
+  if (o && (/^http:\/\/localhost:\d+$/.test(o) || o === process.env.CORS_ORIGIN)) {
+    res.set({
+      'Access-Control-Allow-Origin': o, Vary: 'Origin',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+    });
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+  }
+  next();
+});
 app.use(express.static(dist));
 
 // ---------- settings ----------
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const LEAD_HOURS = Number(process.env.LEAD_HOURS) || 24;                 // notice needed for standard orders
 const CUSTOM_LEAD_HOURS = Number(process.env.CUSTOM_LEAD_HOURS) || 72;   // notice needed for custom cakes
 const DEFAULT_DAILY_UNITS = Number(process.env.DEFAULT_DAILY_UNITS) || 30;
@@ -63,7 +77,7 @@ function contact(b) {
     customer: str(b.customer, 80), phone: str(b.phone, 15), email: str(b.email, 120) || null,
     address: str(b.address, 300), pincode: str(b.pincode, 6),
     delivery_date: str(b.delivery_date, 10), delivery_slot: str(b.delivery_slot, 20),
-    payment: ['cod', 'upi'].includes(b.payment) ? b.payment : 'cod',   // 'upi' = pay by UPI at delivery for now
+    payment: ['cod', 'upi'].includes(b.payment) ? b.payment : 'cod',
     note: str(b.note, 200) || null,
   };
   if (c.customer.length < 2) fail(400, 'Enter your name');
@@ -90,24 +104,10 @@ const release = (db, day, n) => n > 0
   ? db.query('UPDATE day_capacity SET used_units = GREATEST(used_units - $2, 0) WHERE day = $1', [day, n])
   : null;
 
-// ---------- admin auth (single owner): send the key in the x-admin-key header ----------
-const attempts = new Map();
-function admin(req, res, next) {
-  const rec = attempts.get(req.ip) || { n: 0, t: Date.now() };
-  if (Date.now() - rec.t > 15 * 60e3) { rec.n = 0; rec.t = Date.now(); }
-  if (rec.n >= 10) return res.status(429).json({ error: 'Too many attempts. Try again later.' });
-  const given = Buffer.from(String(req.get('x-admin-key') || '')), real = Buffer.from(ADMIN_KEY);
-  if (!ADMIN_KEY || given.length !== real.length || !crypto.timingSafeEqual(given, real)) {
-    rec.n++; attempts.set(req.ip, rec);
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  next();
-}
+// accounts, admin role, items, offers, profile, Cloudinary signing
+const { admin, loadUser, seedAdmin } = require('./extras')(app, pool, { h, fail, str, intParam, tx });
 
 // ---------- public API ----------
-app.get('/api/products', h(async (req, res) =>
-  res.json((await pool.query('SELECT id, name, category, image, price_paise, available FROM products ORDER BY id')).rows)));
-
 app.get('/api/bestsellers', h(async (req, res) =>
   res.json((await pool.query('SELECT * FROM bestsellers ORDER BY rank, name LIMIT 3')).rows)));
 
@@ -135,8 +135,9 @@ app.get('/api/availability', h(async (req, res) => {
   });
 }));
 
-// Standard order: prices and capacity are checked against the database, all in one transaction.
 app.post('/api/orders', h(async (req, res) => {
+  const u = await loadUser(req);
+  if (!u) fail(401, 'Please log in to place an order');
   const b = req.body || {};
   const c = contact(b);
   const want = new Map();
@@ -151,19 +152,32 @@ app.post('/api/orders', h(async (req, res) => {
   const order = await tx(async db => {
     const areaFeePaise = await areaFee(db, c.pincode);
     const ids = [...want.keys()].sort((a, z) => a - z);
-    const { rows: ps } = await db.query('SELECT id, price_paise, units, available FROM products WHERE id = ANY($1::int[]) ORDER BY id', [ids]);
+    const { rows: ps } = await db.query(
+      'SELECT id, name, price_paise, available FROM products WHERE id = ANY($1::int[]) AND NOT archived ORDER BY id', [ids]);
     if (ps.length !== ids.length || ps.some(p => !p.available)) fail(409, 'Some items are no longer available. Please review your bag.');
-    let subtotal = 0, units = 0;
-    for (const p of ps) { subtotal += p.price_paise * want.get(p.id); units += p.units * want.get(p.id); }
-    if (!(await reserve(db, c.delivery_date, units))) fail(409, 'That day is fully booked. Please choose another date.');
+    let subtotal = 0;
+    for (const p of ps) {
+      const q = want.get(p.id);
+      // this item's limit for the delivery day (no row = unlimited); the row lock keeps two orders from overselling
+      const lim = (await db.query('SELECT max_qty FROM item_day_limits WHERE product_id = $1 AND day = $2::date FOR UPDATE', [p.id, c.delivery_date])).rows[0];
+      if (lim) {
+        const { n } = (await db.query(
+          `SELECT COALESCE(SUM(oi.qty), 0)::int AS n FROM order_items oi JOIN orders o ON o.id = oi.order_id
+           WHERE oi.product_id = $1 AND o.delivery_date = $2::date AND o.status <> 'cancelled'`, [p.id, c.delivery_date])).rows[0];
+        if (n + q > lim.max_qty) fail(409, `${p.name}: only ${Math.max(0, lim.max_qty - n)} left for that day. Please change the quantity or the date.`);
+      }
+      const s = await db.query('UPDATE products SET stock = stock - $2 WHERE id = $1 AND (stock IS NULL OR stock >= $2)', [p.id, q]);
+      if (!s.rowCount) fail(409, `${p.name} just sold out. Please review your bag.`);
+      subtotal += p.price_paise * q;
+    }
     const fee = subtotal >= FREE_ABOVE ? 0 : areaFeePaise;
     const o = await db.query(
-      `INSERT INTO orders (kind, customer, phone, email, address, pincode, delivery_date, delivery_slot, payment, note,
-                           units_reserved, subtotal_paise, delivery_paise, total_paise)
+      `INSERT INTO orders (kind, user_id, customer, phone, email, address, pincode, delivery_date, delivery_slot, payment, note,
+                           subtotal_paise, delivery_paise, total_paise)
        VALUES ('standard',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING id, public_token, total_paise`,
-      [c.customer, c.phone, c.email, c.address, c.pincode, c.delivery_date, c.delivery_slot, c.payment, c.note,
-       units, subtotal, fee, subtotal + fee]);
+      [u.id, c.customer, c.phone, c.email, c.address, c.pincode, c.delivery_date, c.delivery_slot, c.payment, c.note,
+       subtotal, fee, subtotal + fee]);
     for (const p of ps)
       await db.query('INSERT INTO order_items VALUES ($1,$2,$3,$4)', [o.rows[0].id, p.id, want.get(p.id), p.price_paise]);
     return o.rows[0];
@@ -171,8 +185,10 @@ app.post('/api/orders', h(async (req, res) => {
   res.json(order);
 }));
 
-// Custom cake request: no price and no capacity yet. You review it and send a quote.
+// Custom cake request: needs a login. No price and no capacity yet; you review it and send a quote.
 app.post('/api/custom-requests', h(async (req, res) => {
+  const u = await loadUser(req);
+  if (!u) fail(401, 'Please log in to send a request');
   const b = req.body || {};
   const c = contact(b);
   const d = b.details || {};
@@ -183,9 +199,9 @@ app.post('/api/custom-requests', h(async (req, res) => {
   checkWhen(c.delivery_date, c.delivery_slot, CUSTOM_LEAD_HOURS);
   await areaFee(pool, c.pincode);
   const r = await pool.query(
-    `INSERT INTO orders (kind, status, customer, phone, email, address, pincode, delivery_date, delivery_slot, payment, note, custom_details)
-     VALUES ('custom','requested',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, public_token`,
-    [c.customer, c.phone, c.email, c.address, c.pincode, c.delivery_date, c.delivery_slot, c.payment, c.note, details]);
+    `INSERT INTO orders (kind, status, user_id, customer, phone, email, address, pincode, delivery_date, delivery_slot, payment, note, custom_details)
+     VALUES ('custom','requested',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, public_token`,
+    [u.id, c.customer, c.phone, c.email, c.address, c.pincode, c.delivery_date, c.delivery_slot, c.payment, c.note, details]);
   res.json(r.rows[0]);
 }));
 
@@ -211,7 +227,7 @@ app.post('/api/orders/:token/accept', h(async (req, res) => {
   r.rowCount ? res.json({ ok: true }) : fail(409, 'This quote can no longer be accepted');
 }));
 
-// ---------- admin API ----------
+// ---------- admin API (admin accounts only) ----------
 app.get('/api/admin/ping', admin, (req, res) => res.json({ ok: true }));
 
 // Upcoming orders by default; ?date=YYYY-MM-DD for one delivery day (any status).
@@ -236,36 +252,37 @@ app.post('/api/admin/orders/:id/status', admin, h(async (req, res) => {
   r.rowCount ? res.json(r.rows[0]) : fail(409, 'That order cannot move to that status');
 }));
 
+// body { paid: false } marks an order unpaid again
 app.post('/api/admin/orders/:id/paid', admin, h(async (req, res) => {
-  const r = await pool.query("UPDATE orders SET payment_status = 'paid' WHERE id = $1 AND status <> 'cancelled' RETURNING id", [intParam(req.params.id)]);
+  const r = await pool.query("UPDATE orders SET payment_status = $2 WHERE id = $1 AND status <> 'cancelled' RETURNING id",
+    [intParam(req.params.id), req.body?.paid === false ? 'pending' : 'paid']);
   r.rowCount ? res.json({ ok: true }) : fail(404, 'Not found');
 }));
 
-// Quote a custom cake: sets the price, reserves capacity for that day (units = how much of the day it uses).
 app.post('/api/admin/orders/:id/quote', admin, h(async (req, res) => {
   const id = intParam(req.params.id);
-  const price = Number(req.body?.quoted_paise), units = Number(req.body?.units ?? 6);
+  const price = Number(req.body?.quoted_paise);
   if (!Number.isInteger(price) || price < 10000) fail(400, 'Enter the quote in paise (at least Rs 100)');
-  if (!Number.isInteger(units) || units < 1 || units > 50) fail(400, 'Units must be between 1 and 50');
   const note = str(req.body?.owner_note, 300) || null;
   const out = await tx(async db => {
     const { rows } = await db.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [id]);
     const o = rows[0];
     if (!o || o.kind !== 'custom') fail(404, 'Not found');
     if (!['requested', 'quoted'].includes(o.status)) fail(409, 'This request can no longer be re-quoted');
-    await release(db, o.delivery_date, o.units_reserved);               // re-quoting gives back the earlier reservation
-    if (!(await reserve(db, o.delivery_date, units))) fail(409, 'Not enough capacity left on that day');
-    const area = await areaFee(db, o.pincode);
-    const fee = price >= FREE_ABOVE ? 0 : area;
+    const day = str(req.body?.delivery_date, 10) || o.delivery_date;
+    const slot = str(req.body?.delivery_slot, 20) || o.delivery_slot;
+    if (day !== o.delivery_date || slot !== o.delivery_slot) checkWhen(day, slot, CUSTOM_LEAD_HOURS);
+    const fee = price >= FREE_ABOVE ? 0 : await areaFee(db, o.pincode);
     const r = await db.query(
-      `UPDATE orders SET status = 'quoted', units_reserved = $2, subtotal_paise = $3, delivery_paise = $4,
-              total_paise = $5, owner_note = $6 WHERE id = $1 RETURNING id, status, total_paise`,
-      [id, units, price, fee, price + fee, note]);
+      `UPDATE orders SET status = 'quoted', delivery_date = $6, delivery_slot = $7, subtotal_paise = $2, delivery_paise = $3,
+              total_paise = $4, owner_note = $5 WHERE id = $1 RETURNING id, status, total_paise`,
+      [id, price, fee, price + fee, note, day, slot]);
     return r.rows[0];
   });
   res.json(out);
 }));
 
+// Cancel (also how you decline a custom request): gives back capacity and stock.
 app.post('/api/admin/orders/:id/cancel', admin, h(async (req, res) => {
   const id = intParam(req.params.id);
   await tx(async db => {
@@ -274,6 +291,9 @@ app.post('/api/admin/orders/:id/cancel', admin, h(async (req, res) => {
     if (!o) fail(404, 'Not found');
     if (['delivered', 'cancelled'].includes(o.status)) fail(409, 'This order is already closed');
     await release(db, o.delivery_date, o.units_reserved);
+    await db.query(
+      `UPDATE products p SET stock = p.stock + oi.qty FROM order_items oi
+       WHERE oi.order_id = $1 AND oi.product_id = p.id AND p.stock IS NOT NULL`, [id]);
     await db.query("UPDATE orders SET status = 'cancelled', units_reserved = 0, owner_note = COALESCE($2, owner_note) WHERE id = $1",
       [id, str(req.body?.owner_note, 300) || null]);
   });
@@ -291,37 +311,42 @@ app.put('/api/admin/capacity/:day', admin, h(async (req, res) => {
   r.rowCount ? res.json(r.rows[0]) : fail(409, 'More than that is already booked for this day');
 }));
 
-app.patch('/api/admin/products/:id', admin, h(async (req, res) => {
-  const price = req.body?.price_paise == null ? null : Number(req.body.price_paise);
-  const available = typeof req.body?.available === 'boolean' ? req.body.available : null;
-  if (price !== null && (!Number.isInteger(price) || price <= 0)) fail(400, 'Bad price');
-  const r = await pool.query(
-    'UPDATE products SET price_paise = COALESCE($2, price_paise), available = COALESCE($3, available) WHERE id = $1 RETURNING *',
-    [intParam(req.params.id), price, available]);
-  r.rowCount ? res.json(r.rows[0]) : fail(404, 'Not found');
+// Every menu item for one delivery day: its limit (null = unlimited) and how many are already booked.
+app.get('/api/admin/capacity', admin, h(async (req, res) => {
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : istDate(new Date());
+  const { rows } = await pool.query(
+    `SELECT p.id, p.name, p.image, p.available, p.stock, l.max_qty,
+            COALESCE((SELECT SUM(oi.qty) FROM order_items oi JOIN orders o ON o.id = oi.order_id
+                      WHERE oi.product_id = p.id AND o.delivery_date = $1::date AND o.status <> 'cancelled'), 0)::int AS booked
+     FROM products p LEFT JOIN item_day_limits l ON l.product_id = p.id AND l.day = $1::date
+     WHERE NOT p.archived ORDER BY p.id`, [day]);
+  res.json(rows);
 }));
 
-// ---------- real-time: Postgres NOTIFY -> browsers via Server-Sent Events ----------
-const clients = new Set();
-app.get('/events', (req, res) => {
-  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-  res.flushHeaders();
-  clients.add(res);
-  req.on('close', () => clients.delete(res));
-});
-setInterval(() => clients.forEach(c => c.write(': ping\n\n')), 25000);
+// Set (or clear, with a blank limit) one item's limit for a day, optionally repeated for the next N days.
+app.put('/api/admin/capacity', admin, h(async (req, res) => {
+  const day = str(req.body?.date, 10), pid = Number(req.body?.product_id);
+  const days = Math.min(60, Math.max(1, Number(req.body?.days) || 1));
+  const raw = req.body?.max_qty;
+  const max = raw === null || raw === undefined || raw === '' ? null : Number(raw);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isInteger(pid)) fail(400, 'Bad request');
+  if (max !== null && (!Number.isInteger(max) || max < 0 || max > 100000)) fail(400, 'Enter a whole number, or leave it blank for unlimited');
+  if (max === null)
+    await pool.query('DELETE FROM item_day_limits WHERE product_id = $1 AND day >= $2::date AND day < $2::date + $3::int', [pid, day, days]);
+  else
+    await pool.query(
+      `INSERT INTO item_day_limits (product_id, day, max_qty)
+       SELECT $1, d::date, $3 FROM generate_series($2::date, $2::date + ($4::int - 1), '1 day') d
+       ON CONFLICT (product_id, day) DO UPDATE SET max_qty = EXCLUDED.max_qty`, [pid, day, max, days]);
+  res.json({ ok: true });
+}));
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
-app.use((req, res) => res.sendFile(path.join(dist, 'index.html')));
+app.use((req, res) => fs.existsSync(path.join(dist, 'index.html')) ? res.sendFile(path.join(dist, 'index.html')) : res.status(404).send('Not found'));
 
 async function start() {
-  if (!ADMIN_KEY) console.warn('ADMIN_KEY is not set: admin routes are disabled');
   await pool.query(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
-  const listener = new Client({ connectionString: process.env.DATABASE_URL, ssl });
-  await listener.connect();
-  listener.on('error', e => { console.error(e); process.exit(1); }); // let the host restart us and reconnect
-  await listener.query('LISTEN olive');
-  listener.on('notification', m => clients.forEach(c => c.write(`data: ${m.payload}\n\n`)));
+  await seedAdmin();
   app.listen(process.env.PORT || 3000, () => console.log('OliviaBakes running on port ' + (process.env.PORT || 3000)));
 }
 start().catch(e => { console.error(e); process.exit(1); });

@@ -61,19 +61,6 @@ CREATE TABLE IF NOT EXISTS order_items (
 
 CREATE INDEX IF NOT EXISTS idx_orders_delivery ON orders(delivery_date, status);
 
--- Real-time: every order/product change sends a small notification (no personal data in the payload)
-CREATE OR REPLACE FUNCTION notify_change() RETURNS trigger AS $$
-BEGIN
-  PERFORM pg_notify('olive', json_build_object('table', TG_TABLE_NAME, 'op', TG_OP,
-    'id', NEW.id, 'status', to_jsonb(NEW)->>'status')::text);
-  RETURN NEW;
-END $$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS t_products ON products;
-CREATE TRIGGER t_products AFTER UPDATE ON products FOR EACH ROW EXECUTE FUNCTION notify_change();
-DROP TRIGGER IF EXISTS t_orders ON orders;
-CREATE TRIGGER t_orders AFTER INSERT OR UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION notify_change();
-
 -- Analytics: bestsellers ranked with a window function (cancelled orders don't count)
 CREATE OR REPLACE VIEW bestsellers AS
 SELECT p.name,
@@ -102,3 +89,104 @@ INSERT INTO products (name, category, image, price_paise, units) VALUES
 ('Blueberry Muffin','pastry','/images/muffin.jpg',9900,1),
 ('Bread Loaf','bread','/images/bread.jpg',8900,2)
 ON CONFLICT (name) DO NOTHING;
+
+-- Accounts: customers and the owner (role 'admin')
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL, phone TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer','admin')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- "Deleted" items that have past orders are archived instead, so order history stays intact
+ALTER TABLE products ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS offers (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL, subtitle TEXT NOT NULL DEFAULT '',
+  active BOOLEAN NOT NULL DEFAULT true, sort INT NOT NULL DEFAULT 0
+);
+INSERT INTO offers (title, subtitle, sort)
+SELECT * FROM (VALUES
+  ('Free delivery', 'On orders above Rs 499', 1),
+  ('Baked to order', 'Order 24 hours ahead for the freshest batch', 2),
+  ('Pay on delivery', 'Cash or UPI at your door', 3)
+) AS v(title, subtitle, sort)
+WHERE NOT EXISTS (SELECT 1 FROM offers);
+
+-- Uploaded product photos (stored in the database, so they survive redeploys and never go in GitHub)
+CREATE TABLE IF NOT EXISTS images (
+  id SERIAL PRIMARY KEY,
+  mime TEXT NOT NULL, data BYTEA NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id);
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id);
+-- stock per item (NULL = not tracked, unlimited)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS stock INT CHECK (stock >= 0);
+
+CREATE TABLE IF NOT EXISTS addresses (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  label TEXT NOT NULL DEFAULT 'Home',
+  address TEXT NOT NULL CHECK (length(trim(address)) >= 8),
+  pincode TEXT NOT NULL CHECK (pincode ~ '^[0-9]{6}$'),
+  is_default BOOLEAN NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS favourites (
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, product_id)
+);
+
+-- LISTEN/NOTIFY removed
+DROP TRIGGER IF EXISTS t_products ON products;
+DROP TRIGGER IF EXISTS t_orders ON orders;
+DROP FUNCTION IF EXISTS notify_change();
+
+-- item details (customers see these; cost_paise is for the owner only)
+ALTER TABLE products ADD COLUMN IF NOT EXISTS ingredients TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS allergens TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS weight_g INT CHECK (weight_g > 0);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_paise INT CHECK (cost_paise >= 0);
+
+-- per-item limit for one delivery day; no row = unlimited
+CREATE TABLE IF NOT EXISTS item_day_limits (
+  product_id INT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  day DATE NOT NULL,
+  max_qty INT NOT NULL CHECK (max_qty >= 0),
+  PRIMARY KEY (product_id, day)
+);
+
+-- password reset links (only a hash of the token is stored)
+CREATE TABLE IF NOT EXISTS password_resets (
+  token_hash TEXT PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+-- more delivery pincodes (Vijayawada). Rename the areas and change the fees to suit you.
+INSERT INTO service_areas (pincode, area_name, delivery_paise) VALUES
+('520001','Vijayawada',3000),('520002','Vijayawada',3000),('520003','Vijayawada',3000),
+('520004','Vijayawada',4000),('520007','Vijayawada',4000),('520008','Vijayawada',4000),
+('520011','Vijayawada',4000),('520012','Vijayawada',5000),('520013','Vijayawada',5000)
+ON CONFLICT (pincode) DO NOTHING;
+UPDATE service_areas SET area_name = 'Vijayawada' WHERE area_name LIKE 'Sample area%';
+
+-- SAMPLE details for the starter cookies. Check them against your own recipes before real customers see them.
+UPDATE products p SET ingredients = v.i, allergens = v.a, weight_g = v.w
+FROM (VALUES
+ ('Chocolate Chunk Cookie','Wheat flour, butter, brown sugar, sugar, eggs, dark chocolate chunks, vanilla, baking soda, salt','Gluten (wheat), milk, eggs, soy',90),
+ ('Double Chocolate Cookie','Wheat flour, butter, sugar, eggs, cocoa, dark chocolate chunks, vanilla, baking soda, salt','Gluten (wheat), milk, eggs, soy',90),
+ ('Strawberry Cream Cookie','Wheat flour, butter, sugar, eggs, white chocolate, freeze-dried strawberry, vanilla, baking soda, salt','Gluten (wheat), milk, eggs, soy',85),
+ ('Oatmeal Raisin Cookie','Rolled oats, wheat flour, butter, brown sugar, eggs, raisins, cinnamon, baking soda, salt','Gluten (wheat, oats), milk, eggs',80),
+ ('Sea Salt Caramel Cookie','Wheat flour, butter, brown sugar, eggs, caramel, sea salt, vanilla, baking soda','Gluten (wheat), milk, eggs',90)
+) AS v(n, i, a, w) WHERE p.name = v.n AND p.ingredients IS NULL;
+
+-- demo pincode: lets anyone get through checkout while the site is a demo
+INSERT INTO service_areas (pincode, area_name, delivery_paise) VALUES ('000000', 'Demo area', 4000)
+ON CONFLICT (pincode) DO NOTHING;

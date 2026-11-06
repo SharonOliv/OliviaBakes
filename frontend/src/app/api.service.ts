@@ -3,7 +3,7 @@ import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 
-export interface Product { id: number; name: string; category: string; image: string | null; price_paise: number; available: boolean }
+export interface Product { id: number; name: string; category: string; image: string | null; price_paise: number; available: boolean; stock: number | null; ingredients: string | null; allergens: string | null; weight_g: number | null }
 export interface Best { name: string; sold: number; rank: number }
 export interface Day { day: string; remaining: number; slots: string[]; custom_slots: string[] }
 export interface Availability { slot_labels: Record<string, string>; lead_hours: number; custom_lead_hours: number; days: Day[] }
@@ -172,16 +172,12 @@ export class ApiService {
     return firstValueFrom(this.http.patch<Product>(`/api/admin/products/${id}`, patch, this.opts(true)));
   }
 
-  private dirty = new Set<string>();
+  // Refresh every so often instead of server push (LISTEN/NOTIFY is gone)
   private listen() {
-    new EventSource('/events').onmessage = m => {
-      this.dirty.add(JSON.parse(m.data).table);
-      clearTimeout(this.timer);
-      this.timer = setTimeout(() => {
-        if (this.dirty.has('products')) this.loadProducts();
-        if (this.dirty.has('orders')) { this.events.update(n => n + 1); this.loadBest(); this.loadAvailability(); }
-        this.dirty.clear();
-      }, 300);
-    };
+    setInterval(() => {
+      if (document.hidden) return;
+      this.events.update(n => n + 1);
+      this.loadProducts().catch(() => {}); this.loadBest().catch(() => {}); this.loadAvailability().catch(() => {});
+    }, 20000);
   }
 }
