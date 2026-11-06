@@ -1,91 +1,81 @@
-# OliveBakes
+# OliviaBakes
 
-A real-time bakery ordering app with a queue system, like a counter at a busy cafe. Customers order, get a ticket number, and watch their place in line move live.
+A full-stack online bakery. Customers order cookies for a chosen delivery day, and the owner runs everything from an admin portal.
 
-**Live demo:** https://oliviabakes.onrender.com/
+**Live demo:** https://olivia-bakes.vercel.app/
 
-The free server sleeps when idle, so the first load can take about 30 seconds.
+## Stack
+
+| Layer | Tech |
+|---|---|
+| Frontend | Angular 19 (standalone components, signals), TypeScript |
+| Backend | Node.js, Express, node-postgres |
+| Database | PostgreSQL on Neon |
+| Media | Cloudinary (signed uploads) |
+| Hosting | Vercel · Render · Neon |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  B[Angular app<br/>Vercel] -->|REST + Bearer token| A[Express API<br/>Render]
+  A -->|SQL transactions| D[(PostgreSQL<br/>Neon)]
+  B -->|signed upload| C[Cloudinary]
+```
 
 ## Features
 
-- Menu with photos, category filters, and live stock counts
-- Bag and checkout with pickup or delivery, and payment options (simulated)
-- Ticket numbers and a live order tracker
-- Public "Now serving" board
-- Kitchen screen to run the queue
-- Scroll-driven 3D photo animations (Three.js)
-- Prices in rupees
+**Customers**
+- Sign up, log in, reset password
+- Typo-tolerant search, item details (ingredients, allergens, weight), favourites
+- Saved addresses, calendar-based delivery slots, order tracking by private link
+- Custom cake requests with an owner quote
 
-## Tech Stack
+**Admin portal**
+- Role-protected sidebar: active orders (paid or unpaid), custom requests, daily capacity, items, offers
+- Quote, reschedule or decline custom cakes
+- Per-item daily limits, stock counts, item CRUD with photo upload
 
-| Layer | Technology |
+## Engineering highlights
+
+- **Concurrency-safe checkout:** one DB transaction recomputes prices server-side, checks per-item daily limits under row locks (`SELECT … FOR UPDATE`) and decrements stock atomically (`UPDATE … WHERE stock >= qty`).
+- **Auth:** scrypt password hashing, HMAC-signed tokens, role re-checked against the DB on every request, rate-limited login and reset, single-use SHA-256-hashed reset tokens that expire in 30 minutes.
+- **Safe SQL:** parameterised queries everywhere; dynamic updates use a whitelist of columns.
+- **History preserved:** items with past orders are archived instead of deleted.
+- **Postgres features:** window-function view (`RANK() OVER`), `generate_series` availability, JSONB, CHECK constraints.
+- **Private tracking:** orders are tracked by unguessable UUIDs, not sequential IDs.
+- **Uploads:** Cloudinary signing happens server-side, so the API secret never reaches the browser.
+- **Design note:** started with LISTEN/NOTIFY and SSE, then moved to 20 s polling because pooled serverless Postgres can't hold LISTEN sessions reliably.
+
+## Run locally
+
+```bash
+# backend (needs Node 20+)
+cd backend && npm install
+npm run dev            # http://localhost:3000
+
+# frontend
+cd frontend && npm install
+npm start              # http://localhost:4200
+
+# optional fake users and orders
+cd backend && node --env-file=.env seed-demo.js
+```
+
+`backend/.env`:
+
+| Variable | Purpose |
 |---|---|
-| Frontend | Angular, TypeScript, Three.js |
-| Backend | Node.js, Express |
-| Database | PostgreSQL (Neon) |
-| Hosting | Render |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `JWT_SECRET` | token signing key |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | creates the admin account on first start |
+| `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | image uploads |
+| `APP_URL`, `CORS_ORIGIN` | frontend address, for reset links and CORS |
 
-## Database Highlights
+## Deploy
 
-- **Transactional checkout:** stock is taken with `UPDATE ... WHERE stock >= qty`, so the last item can never be oversold
-- **Real-time updates:** triggers call `pg_notify`, the server `LISTEN`s and streams changes to browsers over Server-Sent Events
-- **Queue positions:** `ROW_NUMBER() OVER (PARTITION BY status ...)` in a view
-- **Bestsellers:** ranked with a `RANK()` window function view
-- **Safe order claiming:** `FOR UPDATE SKIP LOCKED` stops two staff taking the same order
-- **Data integrity:** CHECK constraints, foreign keys, indexes, and money stored as integer paise
-- **Server-side pricing:** totals and delivery fees are recalculated from the database, never trusted from the browser
+Neon (database) → Render (root `backend`, start `npm start`) → Vercel (root `frontend`, output `dist/web/browser`).
 
-## Run Locally
+## Next
 
-You need Node 20+ and a PostgreSQL database (a free Neon database works).
-
-```bash
-git clone https://github.com/YOUR-USERNAME/olivebakes.git
-cd olivebakes
-```
-
-Create `backend/.env`:
-
-```
-DATABASE_URL=your_postgres_connection_string
-```
-
-Start the backend:
-
-```bash
-cd backend
-npm install
-npm run dev
-```
-
-Start the frontend in a second terminal:
-
-```bash
-cd frontend
-npm install
-npm start
-```
-
-Open http://localhost:4200. Tables and sample products are created automatically on first start.
-
-## Project Structure
-
-```
-backend/     Express API, schema.sql, real-time events
-frontend/    Angular app (pages, 3D scene, services)
-```
-
-## Pages
-
-| Route | Purpose |
-|---|---|
-| `/` | Home with 3D scroll animation |
-| `/menu` | Browse and add to bag |
-| `/checkout` | Details, pickup or delivery, payment |
-| `/track/:id` | Live ticket and queue position |
-| `/board` | Now serving screen |
-| `/kitchen` | Staff queue controls |
-
-## Notes
-
-Payments are simulated and no money is charged. The kitchen screen has no login, and adding authentication is the next step.
+Online UPI payments · emailed reset links through an HTTPS email API · automated tests
