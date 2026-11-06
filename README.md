@@ -36,17 +36,6 @@ flowchart LR
 - Quote, reschedule or decline custom cakes
 - Per-item daily limits, stock counts, item CRUD with photo upload
 
-## Engineering highlights
-
-- **Concurrency-safe checkout:** one DB transaction recomputes prices server-side, checks per-item daily limits under row locks (`SELECT … FOR UPDATE`) and decrements stock atomically (`UPDATE … WHERE stock >= qty`).
-- **Auth:** scrypt password hashing, HMAC-signed tokens, role re-checked against the DB on every request, rate-limited login and reset, single-use SHA-256-hashed reset tokens that expire in 30 minutes.
-- **Safe SQL:** parameterised queries everywhere; dynamic updates use a whitelist of columns.
-- **History preserved:** items with past orders are archived instead of deleted.
-- **Postgres features:** window-function view (`RANK() OVER`), `generate_series` availability, JSONB, CHECK constraints.
-- **Private tracking:** orders are tracked by unguessable UUIDs, not sequential IDs.
-- **Uploads:** Cloudinary signing happens server-side, so the API secret never reaches the browser.
-- **Design note:** started with LISTEN/NOTIFY and SSE, then moved to 20 s polling because pooled serverless Postgres can't hold LISTEN sessions reliably.
-
 ## Run locally
 
 ```bash
