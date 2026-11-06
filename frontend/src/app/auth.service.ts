@@ -9,7 +9,7 @@ interface AuthResponse { token: string; user: User }
 
 const TOKEN_KEY = 'oliviabakes_token';
 // Development: the page is on :4200 and talks to the backend on :3000 directly. Production: one server, same address.
-const API = location.hostname === 'localhost' ? 'http://localhost:3000' : '';
+const API = location.hostname === 'localhost' ? 'http://localhost:3000' : 'https://oliviabakes-api.onrender.com';
 
 @Injectable({ providedIn: 'root' })
 export class AuthService {
