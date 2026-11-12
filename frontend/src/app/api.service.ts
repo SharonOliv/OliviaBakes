@@ -21,7 +21,7 @@ export interface AdminOrder extends OrderInfo {
 }
 export interface DeliveryForm {
   customer: string; phone: string; email: string; address: string; pincode: string;
-  delivery_date: string; delivery_slot: string; payment: 'cod' | 'upi'; note: string;
+  delivery_date: string; delivery_slot: string; payment: 'cod' | 'upi' | 'card'; note: string;
 }
 
 export const FREE_ABOVE = 49900;
@@ -128,17 +128,29 @@ export class ApiService {
     this.router.navigate(['/track', token]);
   }
 
-  // Both return an error message, or null on success
   async placeOrder(f: DeliveryForm): Promise<string | null> {
-    const items = Object.entries(this.cart()).map(([id, qty]) => ({ id: +id, qty }));
-    try {
-      const r = await this.post<{ public_token: string }>('/api/orders', { ...f, items });
-      this.cart.set({});
-      this.rememberProfile(f);
-      this.remember(r.public_token);
+  const items = Object.entries(this.cart()).map(([id, qty]) => ({ id: +id, qty }));
+  try {
+    const r = await this.post<{ public_token: string }>('/api/orders', { ...f, items });
+    this.cart.set({});
+    this.rememberProfile(f);
+    if (f.payment === 'card') {                       // the order is saved; now go to Stripe's page
+      this.myOrder.set(r.public_token);
+      try { localStorage.setItem('oliviabakes_order', r.public_token); } catch {}
+      try {
+        const s = await this.post<{ url: string }>('/api/orders/' + r.public_token + '/checkout');
+        location.href = s.url;
+      }catch (e: any) {
+        this.say('Order placed, but payment could not start: ' + (e.error?.error ?? 'please pay on delivery.'));
+        this.router.navigate(['/track', r.public_token]);
+      }
       return null;
-    } catch (e: any) { return e.error?.error ?? 'Order failed'; }
-  }
+    }
+    this.remember(r.public_token);
+    return null;
+  } catch (e: any) { return e.error?.error ?? 'Order failed'; }
+}
+
   async placeCustom(f: DeliveryForm, details: CustomDetails): Promise<string | null> {
     try {
       const r = await this.post<{ public_token: string }>('/api/custom-requests', { ...f, details });

@@ -6,7 +6,7 @@ import { firstValueFrom } from 'rxjs';
 import { ApiService, FREE_ABOVE, Product, money } from '../api.service';
 import { AuthService } from '../auth.service';
 
-interface Offer { id: number; title: string; subtitle: string }
+interface Offer { id: number; title: string; subtitle: string; terms: string; cta: string }
 
 @Component({
   standalone: true,
@@ -67,6 +67,20 @@ interface Offer { id: number; title: string; subtitle: string }
     .atags span { background: #FFF1F4; color: var(--a); border-radius: 999px; padding: 4px 12px; font-size: .82rem; }
     .mfine { font-size: .8rem; color: var(--m); }
     @media (max-width: 800px) { .hgrid { grid-template-columns: 1fr; } .hvis { display: none; } .barin { flex-wrap: wrap; } .sbox { flex: 1 1 100%; } .modal { grid-template-columns: 1fr; } .mimg { min-height: 200px; } }
+    .osec { padding-top: 26px; }
+    .oh { font-size: 1.25rem; margin: 0 0 14px; }
+    .marquee { overflow: hidden; -webkit-mask-image: linear-gradient(90deg, transparent, #000 3%, #000 97%, transparent); mask-image: linear-gradient(90deg, transparent, #000 3%, #000 97%, transparent); }
+    .mtrack { display: flex; width: max-content; animation: slide 60s linear infinite; }
+    .marquee:hover .mtrack { animation-play-state: paused; }
+    .mset { display: flex; gap: 14px; padding-right: 14px; }
+    .ocard { flex: 0 0 300px; border-radius: 16px; padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; }
+    .ocard b { font-size: 1.05rem; }
+    .ocard span { color: var(--m); font-size: .9rem; }
+    .ocard small { color: var(--m); font-size: .74rem; }
+    .claim { align-self: flex-start; margin-top: 10px; border: 0; background: var(--a); color: #fff; border-radius: 999px; padding: 8px 18px; font: 700 .85rem var(--body); cursor: pointer; }
+    .claim:hover { background: #9e2b4b; }
+    @keyframes slide { to { transform: translateX(-50%); } }
+    @media (prefers-reduced-motion: reduce) { .marquee { overflow-x: auto; } .mtrack { animation: none; } }
   `],
   template: `
   <ng-template #buy let-p>
@@ -98,16 +112,32 @@ interface Offer { id: number; title: string; subtitle: string }
           <div class="hvis"><img [src]="heroImg()" alt="" (error)="heroOk.set(false)"></div>
         }
       </div>
-      @if (offers().length) {
-        <div class="offers">
-          @for (o of offers(); track o.id; let i = $index) {
-            <div class="offer" [style.background]="colors[i % colors.length]"><b>{{ o.title }}</b><span>{{ o.subtitle }}</span></div>
-          }
-        </div>
-      }
     </div>
   </section>
 
+    @if (offers().length) {
+    <section class="osec">
+      <div class="wrap">
+        <h2 class="oh">Offers</h2>
+        <div class="marquee">
+          <div class="mtrack" [style.animation-duration.s]="fill().length * 12">
+            @for (copy of [0, 1]; track copy) {
+              <div class="mset" [attr.aria-hidden]="copy === 1" [attr.inert]="copy === 1 ? '' : null">
+                @for (o of fill(); track $index; let i = $index) {
+                  <div class="ocard" [style.background]="colors[i % colors.length]">
+                    <b>{{ o.title }}</b>
+                    <span>{{ o.subtitle }}</span>
+                    @if (o.terms) { <small>{{ o.terms }}</small> }
+                    @if (o.cta) { <button class="claim" (click)="claim()">{{ o.cta }}</button> }
+                  </div>
+                }
+              </div>
+            }
+          </div>
+        </div>
+      </div>
+    </section>
+  }
   <div class="bar" id="menu">
     <div class="wrap barin">
       <div class="sbox">
@@ -209,8 +239,20 @@ export class HomePage {
     const byName = list.filter(p => hit(p.name + ' ' + p.category));
     list = byName.length ? byName : list.filter(p => hit(p.ingredients ?? ''));   // nothing by name: try ingredients
   }
+  
   return list;
 });
+
+
+    // repeats the offers so one set is always wider than the screen (keeps the loop seamless)
+  fill = computed(() => {
+    const l = this.offers();
+    return l.length ? Array.from({ length: Math.ceil(5 / l.length) }, () => l).flat() : [];
+  });
+  claim() {
+    this.api.say('Add your cookies to the bag. Your offer is applied automatically at checkout if you qualify.');
+    document.getElementById('menu')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
   constructor() {
     firstValueFrom(this.http.get<Offer[]>('/api/offers')).then(o => this.offers.set(o)).catch(() => {});

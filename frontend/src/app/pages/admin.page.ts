@@ -38,7 +38,7 @@ const NEXT: Record<string, { to: string; label: string }> = {
           <div class="row" style="margin-top:0">
             <b>#{{ o.id }}</b>
             <span>
-              @if (o.total_paise) { <span class="tag" [class.low]="o.payment_status !== 'paid'">{{ o.payment_status === 'paid' ? 'Paid' : 'Unpaid' }}</span> }
+              @if (o.total_paise) { <span class="tag" [class.low]="o.payment_status !== 'paid'">{{ o.payment_status === 'paid' ? 'Paid' : o.payment_status === 'refunded' ? 'Refunded' : 'Unpaid' }}</span> }
               <span class="tag" [class.out]="o.status === 'cancelled'">{{ label[o.status] }}</span>
             </span>
           </div>
@@ -57,7 +57,7 @@ const NEXT: Record<string, { to: string; label: string }> = {
           @if (o.items?.length) { <ul>@for (i of o.items ?? []; track i.name) { <li>{{ i.qty }} x {{ i.name }}</li> }</ul> }
           @if (o.note) { <p class="small">Customer note: {{ o.note }}</p> }
           @if (o.owner_note) { <p class="small">Your note: {{ o.owner_note }}</p> }
-          @if (o.total_paise) { <p>Total {{ money(o.total_paise) }}. {{ o.payment === 'upi' ? 'UPI' : 'Cash' }} on delivery.</p> }
+          @if (o.total_paise) { <p>Total {{ money(o.total_paise) }}. {{ o.payment === 'card' ? 'Card (Stripe)' : o.payment === 'upi' ? 'UPI on delivery' : 'Cash on delivery' }}.</p> }
 
           @if (o.kind === 'custom' && (o.status === 'requested' || o.status === 'quoted')) {
             <div class="panel" style="padding:16px;margin-top:12px">

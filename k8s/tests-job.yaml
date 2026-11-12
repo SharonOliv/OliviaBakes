@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: api-tests
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: tests
+          image: oliviabakes-api:ci
+          imagePullPolicy: IfNotPresent
+          command: ["node", "--test", "test/api.test.js"]
+          env:
+            - { name: API_URL, value: "http://api:3000" }

@@ -83,6 +83,7 @@ const blankAddr = (): AddrForm => ({ id: null, label: 'Home', address: '', pinco
               <small class="muted">Delivery {{ dayLabel(o.delivery_date) }}</small></span>
             <span class="tag">{{ label[o.status] }}</span>
             <b>{{ o.total_paise ? money(o.total_paise) : '' }}</b>
+            @if (canCancel(o)) { <button class="btn ghost" (click)="cancelOrder(o, $event)">Cancel order</button> }
           </a>
         } @empty { <p class="muted">{{ loaded() ? 'No orders yet.' : 'Loading...' }}</p> }
       }
@@ -131,6 +132,16 @@ export class ProfilePage {
     const body = { label: a.label.trim() || 'Home', address: a.address.trim(), pincode: a.pincode, is_default: a.is_default };
     const req = a.id ? this.http.put(`/api/me/addresses/${a.id}`, body) : this.http.post('/api/me/addresses', body);
     if (await this.call(firstValueFrom(req), 'Address saved')) { this.af.set(blankAddr()); this.loadAddrs(); }
+  }
+  canCancel(o: Row) { return o.kind === 'custom' ? o.status === 'requested' || o.status === 'quoted' : o.status === 'placed'; }
+  async cancelOrder(o: Row, e: Event) {
+    e.preventDefault(); e.stopPropagation();      // the row is a link; don't open the order page
+    if (!confirm(`Cancel order #${o.id}?`)) return;
+    const r = await this.call(firstValueFrom(this.http.post<{ refunded: boolean }>(`/api/orders/${o.public_token}/cancel`, {})));
+    if (r) {
+      this.api.say(r.refunded ? 'Order cancelled. Your refund is on its way.' : 'Order cancelled.');
+      this.orders.update(list => list.map(x => x.id === o.id ? { ...x, status: 'cancelled' } : x));
+    }
   }
   async makeDefault(a: Addr) {
     if (await this.call(firstValueFrom(this.http.put(`/api/me/addresses/${a.id}`, { ...a, is_default: true })))) this.loadAddrs();

@@ -190,3 +190,31 @@ FROM (VALUES
 -- demo pincode: lets anyone get through checkout while the site is a demo
 INSERT INTO service_areas (pincode, area_name, delivery_paise) VALUES ('000000', 'Demo area', 4000)
 ON CONFLICT (pincode) DO NOTHING;
+
+-- Stripe card payments
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS stripe_session_id TEXT;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_check;
+ALTER TABLE orders ADD CONSTRAINT orders_payment_check CHECK (payment IN ('cod','upi','card'));
+
+--cancel order button
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_status_check;
+ALTER TABLE orders ADD CONSTRAINT orders_payment_status_check CHECK (payment_status IN ('pending','paid','refunded'));
+
+-- Offers that really discount an order (discount_type NULL = banner only)
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS terms TEXT NOT NULL DEFAULT '';
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS cta TEXT NOT NULL DEFAULT '';
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS discount_type TEXT CHECK (discount_type IN ('flat','percent'));
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS discount_value INT CHECK (discount_value > 0);       -- paise if flat, percent if percent
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS max_discount_paise INT CHECK (max_discount_paise > 0);
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS min_order_paise INT NOT NULL DEFAULT 0;
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS first_order_only BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE offers ADD COLUMN IF NOT EXISTS card_only BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_paise INT NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS offer_id INT REFERENCES offers(id) ON DELETE SET NULL;
+
+INSERT INTO offers (title, subtitle, terms, discount_type, discount_value, min_order_paise, first_order_only, card_only, max_discount_paise, cta, sort)
+SELECT * FROM (VALUES
+  ('₹200 off on your 1st order', 'Fresh cookies for less. Applied automatically at checkout.', 'First order only. Minimum order ₹599.', 'flat', 20000, 59900, true, false, NULL::int, 'Claim now', 0),
+  ('5% cashback with Card Payment', 'Pay online by card and save on every order.', 'Demo offer: applies to any online card payment. Up to ₹100 off.', 'percent', 5, 0, false, true, 10000, 'Order now', 0)
+) AS v(title, subtitle, terms, discount_type, discount_value, min_order_paise, first_order_only, card_only, max_discount_paise, cta, sort)
+WHERE NOT EXISTS (SELECT 1 FROM offers WHERE discount_type IS NOT NULL);

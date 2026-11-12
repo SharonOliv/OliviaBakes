@@ -12,7 +12,8 @@ const dist = path.join(__dirname, '..', 'frontend', 'dist', 'web', 'browser');
 const app = express();
 app.set('trust proxy', 1);
 app.get('/healthz', (req, res) => res.send('ok'));
-app.use(express.json());
+const json = express.json();
+app.use((req, res, next) => req.originalUrl === '/api/stripe/webhook' ? next() : json(req, res, next));
 
 // In development the Angular page (localhost:4200) calls this server directly. CORS_ORIGIN allows one more site.
 app.use((req, res, next) => {
@@ -77,7 +78,7 @@ function contact(b) {
     customer: str(b.customer, 80), phone: str(b.phone, 15), email: str(b.email, 120) || null,
     address: str(b.address, 300), pincode: str(b.pincode, 6),
     delivery_date: str(b.delivery_date, 10), delivery_slot: str(b.delivery_slot, 20),
-    payment: ['cod', 'upi'].includes(b.payment) ? b.payment : 'cod',
+    payment: ['cod', 'upi','card'].includes(b.payment) ? b.payment : 'cod',
     note: str(b.note, 200) || null,
   };
   if (c.customer.length < 2) fail(400, 'Enter your name');
@@ -106,6 +107,9 @@ const release = (db, day, n) => n > 0
 
 // accounts, admin role, items, offers, profile, Cloudinary signing
 const { admin, loadUser, seedAdmin } = require('./extras')(app, pool, { h, fail, str, intParam, tx });
+require('./payments')(app, pool, { h, fail, tx, loadUser });
+const offers = require('./offers');
+offers.mount(app, pool, { h, loadUser });
 
 // ---------- public API ----------
 app.get('/api/bestsellers', h(async (req, res) =>
@@ -170,14 +174,16 @@ app.post('/api/orders', h(async (req, res) => {
       if (!s.rowCount) fail(409, `${p.name} just sold out. Please review your bag.`);
       subtotal += p.price_paise * q;
     }
+    const offer = await offers.bestOffer(db, u.id, subtotal, c.payment);   // worked out on the server, not trusted from the browser
+    const discount = offer ? offer.discount : 0;
     const fee = subtotal >= FREE_ABOVE ? 0 : areaFeePaise;
     const o = await db.query(
       `INSERT INTO orders (kind, user_id, customer, phone, email, address, pincode, delivery_date, delivery_slot, payment, note,
-                           subtotal_paise, delivery_paise, total_paise)
-       VALUES ('standard',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                           subtotal_paise, delivery_paise, total_paise, discount_paise, offer_id)
+       VALUES ('standard',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
        RETURNING id, public_token, total_paise`,
       [u.id, c.customer, c.phone, c.email, c.address, c.pincode, c.delivery_date, c.delivery_slot, c.payment, c.note,
-       subtotal, fee, subtotal + fee]);
+       subtotal, fee, subtotal - discount + fee, discount, offer ? offer.id : null]);
     for (const p of ps)
       await db.query('INSERT INTO order_items VALUES ($1,$2,$3,$4)', [o.rows[0].id, p.id, want.get(p.id), p.price_paise]);
     return o.rows[0];

@@ -1,4 +1,4 @@
-import { Component, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
@@ -6,6 +6,7 @@ import { ApiService, DeliveryForm, FREE_ABOVE, dayLabel, money, pad } from '../a
 
 interface Addr { id: number; label: string; address: string; pincode: string; is_default: boolean }
 interface Cell { day: string; n: number; ok: boolean }
+interface Applied { id: number; title: string; discount: number }
 
 @Component({
   standalone: true,
@@ -21,6 +22,7 @@ interface Cell { day: string; n: number; ok: boolean }
     .cd:hover:not(:disabled) { background: #FFE3E9; }
     .cd:disabled { background: none; color: #c9b3b8; font-weight: 400; cursor: not-allowed; text-decoration: line-through; }
     .cd.on { background: var(--a); color: #fff; }
+    .disc { color: var(--o); font-weight: 600; }
   `],
   template: `
   <section class="page">
@@ -78,6 +80,7 @@ interface Cell { day: string; n: number; ok: boolean }
         <div class="seg">
           <button [class.on]="f().payment === 'cod'" (click)="set('payment', 'cod')">Cash on delivery</button>
           <button [class.on]="f().payment === 'upi'" (click)="set('payment', 'upi')">UPI on delivery</button>
+          <button [class.on]="f().payment === 'card'" (click)="set('payment', 'card')">Pay online (card)</button>
         </div>
         <label>Note for us (optional) <textarea rows="2" [value]="f().note" (input)="set('note', val($event))"></textarea></label>
         @if (err()) { <p class="err">{{ err() }}</p> }
@@ -90,12 +93,14 @@ interface Cell { day: string; n: number; ok: boolean }
         }
         <div class="srow"><span>Subtotal</span><span>{{ money(api.subtotal()) }}</span></div>
         <div class="srow"><span>Delivery</span><span>{{ api.fee() === null ? 'Enter pincode' : api.fee() === 0 ? 'Free' : money(api.fee() ?? 0) }}</span></div>
+        @if (offer(); as o) { <div class="srow disc"><span>{{ o.title }}</span><span>-{{ money(o.discount) }}</span></div> }
+        @if (cardHint(); as h) { <p class="small muted" style="margin-top:8px">Pay by card to save {{ money(h.discount) }} with "{{ h.title }}"</p> }
         @if (api.toFree() > 0) {
           <p class="small muted" style="margin-top:10px">Add {{ money(api.toFree()) }} more for free delivery</p>
           <div class="progress"><i [style.width.%]="progress()"></i></div>
         }
         <div class="srow big"><b>Total</b><b>{{ money(total()) }}</b></div>
-        <button class="btn wide" [disabled]="busy()" (click)="place()">{{ busy() ? 'Placing order...' : 'Place order' }}</button>
+        <button class="btn wide" [disabled]="busy()" (click)="place()">{{ busy() ? 'Please wait...' : (f().payment === 'card' ? 'Pay & place order' : 'Place order') }}:</button>
         <a routerLink="/cart" class="center-link under small">Back to bag</a>
       </div>
     </div>
@@ -121,7 +126,10 @@ export class CheckoutPage {
 
   days = computed(() => (this.api.avail()?.days ?? []).filter(d => d.slots.length));
   slots = computed(() => this.api.avail()?.days.find(d => d.day === this.f().delivery_date)?.slots ?? []);
-  total = computed(() => this.api.subtotal() + (this.api.fee() ?? 0));
+  pay = computed(() => this.f().payment);
+  offer = signal<Applied | null>(null);
+  cardHint = signal<Applied | null>(null);
+  total = computed(() => this.api.subtotal() + (this.api.fee() ?? 0) - (this.offer()?.discount ?? 0));
   progress = computed(() => Math.min(100, (this.api.subtotal() / FREE_ABOVE) * 100));
 
   // calendar
@@ -151,8 +159,16 @@ export class CheckoutPage {
     const [y, m] = this.cur().split('-').map(Number), t = new Date(y, m - 1 + d, 1);
     this.vm.set(`${t.getFullYear()}-${pad(t.getMonth() + 1)}`);
   }
+  async loadOffer(subtotal: number, payment: string) {
+  if (!subtotal) { this.offer.set(null); this.cardHint.set(null); return; }
+    try {
+      const r = await firstValueFrom(this.http.get<{ applied: Applied | null; card: Applied | null }>('/api/offers/eligible', { params: { subtotal, payment } }));
+      this.offer.set(r.applied); this.cardHint.set(r.card);
+    } catch {}
+  }
 
   constructor() {
+    effect(() => this.loadOffer(this.api.subtotal(), this.pay()));
     firstValueFrom(this.http.get<Addr[]>('/api/me/addresses')).then(a => {
       this.addrs.set(a);
       const d = a.find(x => x.is_default) ?? a[0];

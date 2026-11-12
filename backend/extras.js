@@ -282,7 +282,7 @@ module.exports = (app, pool, { h, fail, str, intParam, tx }) => {
     return [title, str(b?.subtitle, 120), b?.active !== false];
   };
   app.get('/api/offers', h(async (req, res) =>
-    res.json((await pool.query('SELECT id, title, subtitle FROM offers WHERE active ORDER BY sort, id')).rows)));
+    res.json((await pool.query('SELECT id, title, subtitle, terms, cta FROM offers WHERE active ORDER BY sort, id')).rows)));
   app.get('/api/admin/offers', admin, h(async (req, res) =>
     res.json((await pool.query('SELECT id, title, subtitle, active FROM offers ORDER BY sort, id')).rows)));
   app.post('/api/admin/offers', admin, h(async (req, res) =>

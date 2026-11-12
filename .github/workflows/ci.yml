@@ -1,0 +1,65 @@
+name: CI/CD
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+      - run: npm run build
+
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: backend/package-lock.json }
+      - run: npm ci
+      - run: npm test
+
+  k8s-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with: { cluster_name: ci }
+      - run: docker build -t oliviabakes-api:ci backend
+      - run: kind load docker-image oliviabakes-api:ci --name ci
+      - run: kubectl apply -f k8s/app.yaml
+      - run: kubectl rollout status deployment/postgres --timeout=120s
+      - run: kubectl rollout status deployment/api --timeout=180s
+      - run: kubectl apply -f k8s/tests-job.yaml
+      - run: kubectl wait --for=condition=complete job/api-tests --timeout=180s
+      - name: Show logs
+        if: always()
+        run: |
+          kubectl logs job/api-tests || true
+          kubectl logs deployment/api || true
+
+  # deploy:
+  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  #   needs: [frontend, backend, k8s-e2e]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - run: curl -fsS -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
